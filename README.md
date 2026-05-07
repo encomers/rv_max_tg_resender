@@ -21,7 +21,7 @@ Max Platform API  →  Long Poll  →  Parser  →  TelegramSender  →  Telegra
 
 - Python 3.14+
 - Telegram-бот с правами администратора в целевом канале
-- Токен Max Platform API
+- Токен Max-бота с Platform API и правами администратора в читаемом канале (если необходимо чтение канала)
 
 ---
 
@@ -43,7 +43,7 @@ pip install -e .
 
 ```env
 # Токен Max Platform (Bearer-токен)
-MAX_TOKEN=Bearer your_max_token_here
+MAX_TOKEN=Bearer your_max_bot_token_here
 
 # Базовый URL Max API (по умолчанию https://platform-api.max.ru)
 MAX_BASE_URL=https://platform-api.max.ru
@@ -62,7 +62,7 @@ TG_CHANNEL_ID=-1001234567890
 ## Запуск
 
 ```bash
-python -m src.main
+python main.py
 ```
 
 Или напрямую:
@@ -80,31 +80,12 @@ FROM python:3.14-slim
 WORKDIR /app
 COPY . .
 RUN pip install -e .
-CMD ["python", "-m", "src.main"]
+CMD ["python", "-m", "main"]
 ```
 
 ```bash
 docker build -t rv-max .
 docker run --env-file .env rv-max
-```
-
----
-
-## Структура проекта
-
-```
-rv-max/
-├── src/
-│   ├── models/
-│   │   └── updates.py        # Pydantic-модели ответов Max API
-│   └── services/
-│       ├── interface.py      # Абстракции ILongPoll, IMessageSender
-│       ├── max_reader.py     # Long Poll клиент (reader.py)
-│       ├── message_parser.py # Парсер и конвертер разметки (parser.py)
-│       └── message_sender.py # Отправка в Telegram (telegram_sender.py)
-├── main.py                   # Точка входа
-├── pyproject.toml
-└── .env                      # Не коммитить!
 ```
 
 ---
