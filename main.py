@@ -6,6 +6,7 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
+from src.models.requests import SendMessageParams, SendMessageRequest
 from src.models.updates import Update
 from src.services.max_reader import LongPoll
 from src.services.message_parser import UpdateParser
@@ -24,6 +25,7 @@ BASE_URL = os.getenv("MAX_BASE_URL", "https://platform-api.max.ru")
 MAX_TOKEN = os.getenv("MAX_TOKEN")
 TG_TOKEN = os.getenv("TG_TOKEN")
 TG_CHANNEL_ID = os.getenv("TG_CHANNEL_ID")
+ACCEPTED_MAX_CHANNEL = os.getenv("ACCEPTED_MAX_CHANNEL")
 
 MIN_RECONNECT_DELAY = 2
 MAX_RECONNECT_DELAY = 60
@@ -44,6 +46,7 @@ async def handle_update(
     update: Update, parser: UpdateParser, telegram: TelegramSender
 ) -> None:
     try:
+        print(update.model_dump_json(indent=4))
         message = getattr(update, "message", None)
         if message is None:
             return
@@ -89,7 +92,30 @@ async def run_once() -> None:
             channel_id=parse_channel_id(TG_CHANNEL_ID),
         ) as telegram:
             async for update in lp.listen():
-                await handle_update(update, parser, telegram)
+                if (
+                    ACCEPTED_MAX_CHANNEL is not None
+                    and update.message is not None
+                    and update.message.recipient.chat_type == "channel"
+                    and str(update.message.recipient.chat_id) != ACCEPTED_MAX_CHANNEL
+                ):
+                    print(str(update.message.recipient.chat_id))
+                    print(ACCEPTED_MAX_CHANNEL)
+                    continue
+
+                if (
+                    update.message is not None
+                    and update.message.recipient.chat_type in ["chat", "dialog"]
+                ):
+                    params = SendMessageParams(chat_id=update.message.recipient.chat_id)
+                    send_message = SendMessageRequest(
+                        text=update.model_dump_json(indent=4)
+                    )
+                    await lp.send_message(
+                        params=params,
+                        request=send_message,
+                    )
+                else:
+                    await handle_update(update, parser, telegram)
 
 
 async def main() -> None:

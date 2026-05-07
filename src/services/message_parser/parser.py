@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from html import escape
 
-from src.models.updates import Markup, Update
+from src.models.updates import MarkupElement, Update
 
 
 @dataclass
@@ -47,7 +47,7 @@ class UpdateParser:
 
         return ParsedUpdate(text=text, image_urls=image_urls, video_urls=video_urls)
 
-    def _build_html(self, text: str, markup: list[Markup] | None) -> str:
+    def _build_html(self, text: str, markup: list[MarkupElement] | None) -> str:
         if not markup:
             return escape(text)
 

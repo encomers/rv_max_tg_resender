@@ -5,6 +5,7 @@ from typing import AsyncIterator
 import aiohttp
 from aiohttp import ClientError, ServerTimeoutError
 
+from src.models.requests import SendMessageParams, SendMessageRequest
 from src.models.updates import LongPollResponse, Update
 
 from .interface import ILongPoll
@@ -23,6 +24,7 @@ class LongPoll(ILongPoll):
     """
 
     _RETRY_DELAYS = (1, 5, 15, 30, 60)  # секунды между попытками
+    _SEND_TIMEOUT = aiohttp.ClientTimeout(total=10)  # таймаут для POST /messages
 
     def __init__(
         self,
@@ -40,10 +42,11 @@ class LongPoll(ILongPoll):
         """
         self._url = base_url.rstrip("/") + "/updates"
         self._headers = {"Authorization": token}
-        self._timeout = aiohttp.ClientTimeout(total=timeout)
+        self._poll_timeout = aiohttp.ClientTimeout(total=timeout)
         self._max_retries = max_retries
         self._marker: int | None = None
-        self._session: aiohttp.ClientSession | None = None
+        self._poll_session: aiohttp.ClientSession | None = None  # только GET /updates
+        self._send_session: aiohttp.ClientSession | None = None  # только POST /messages
         self._closed = False
 
     # ------------------------------------------------------------------
@@ -51,7 +54,8 @@ class LongPoll(ILongPoll):
     # ------------------------------------------------------------------
 
     async def __aenter__(self) -> "LongPoll":
-        await self._ensure_session()
+        await self._ensure_poll_session()
+        await self._ensure_send_session()
         return self
 
     async def __aexit__(self, *_) -> None:
@@ -66,7 +70,7 @@ class LongPoll(ILongPoll):
         Бесконечный асинхронный генератор.
         Переподключается при сетевых ошибках с экспоненциальными задержками.
         """
-        await self._ensure_session()
+        await self._ensure_poll_session()
         consecutive_errors = 0
 
         while not self._closed:
@@ -105,24 +109,134 @@ class LongPoll(ILongPoll):
                 logger.exception("LongPoll: неожиданная ошибка: %s", exc)
                 raise
 
+    async def send_message(
+        self,
+        params: SendMessageParams,
+        request: SendMessageRequest,
+    ) -> None:
+        """
+        Отправить сообщение пользователю или в чат через Max Platform API.
+
+        POST /messages?user_id=...  — личное сообщение
+        POST /messages?chat_id=...  — сообщение в чат
+
+        :param params: Query-параметры (получатель + disable_link_preview)
+        :param request: Тело запроса (текст, вложения, форматирование и т.д.)
+        :raises RuntimeError: если клиент не инициализирован через async with
+        :raises aiohttp.ClientResponseError: при HTTP-ошибке от API
+        :raises ValueError: если params или request не валидны
+
+        Примеры:
+
+        Личное сообщение пользователю:
+            await lp.send_message(
+                params=SendMessageParams(user_id=123),
+                request=SendMessageRequest(text="Привет!"),
+            )
+
+        Сообщение в чат без превью ссылок:
+            await lp.send_message(
+                params=SendMessageParams(chat_id=456, disable_link_preview=True),
+                request=SendMessageRequest(
+                    text="Ссылка: https://example.com",
+                    format="html",
+                ),
+            )
+
+        Ответ на сообщение с кнопкой:
+            await lp.send_message(
+                params=SendMessageParams(user_id=123),
+                request=SendMessageRequest(
+                    text="Выберите действие",
+                    link=MessageLink(type="reply", mid="msg-abc"),
+                    attachments=[
+                        InlineKeyboardAttachment(
+                            payload=InlineKeyboardPayload(
+                                buttons=[[LinkButton(text="Сайт", url="https://example.com")]]
+                            )
+                        )
+                    ],
+                ),
+            )
+        """
+        await self._ensure_send_session()
+
+        if self._send_session is None:
+            raise RuntimeError(
+                "Сессия не инициализирована. Используйте 'async with LongPoll(...)'"
+            )
+
+        url = self._url.replace("/updates", "/messages")
+
+        logger.debug(
+            "LongPoll.send_message: отправка (params=%s), текст=%r",
+            params.to_query(),
+            request.text,
+        )
+
+        async with self._send_session.post(
+            url,
+            params=params.to_query(),
+            json=request.to_api_payload(),
+        ) as resp:
+            if resp.status == 403:
+                logger.warning(
+                    "LongPoll.send_message: нет доступа (403 Forbidden), params=%s. "
+                    "Возможно, пользователь не запускал бота.",
+                    params.to_query(),
+                )
+                return
+
+            if resp.status == 429:
+                retry_after = int(resp.headers.get("Retry-After", 5))
+                logger.warning(
+                    "LongPoll.send_message: rate limit (429), ждём %d сек.",
+                    retry_after,
+                )
+                await asyncio.sleep(retry_after)
+                return
+
+            resp.raise_for_status()
+
+            logger.debug(
+                "LongPoll.send_message: успешно отправлено (params=%s, status=%d)",
+                params.to_query(),
+                resp.status,
+            )
+
     async def close(self) -> None:
-        """Закрыть сессию и освободить ресурсы."""
+        """Закрыть обе сессии и освободить ресурсы."""
         self._closed = True
-        if self._session and not self._session.closed:
-            await self._session.close()
-            logger.debug("LongPoll: сессия закрыта")
+        if self._poll_session and not self._poll_session.closed:
+            await self._poll_session.close()
+            logger.debug("LongPoll: poll-сессия закрыта")
+        if self._send_session and not self._send_session.closed:
+            await self._send_session.close()
+            logger.debug("LongPoll: send-сессия закрыта")
 
     # ------------------------------------------------------------------
     # Внутренняя логика
     # ------------------------------------------------------------------
 
-    async def _ensure_session(self) -> None:
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(
+    async def _ensure_poll_session(self) -> None:
+        if self._poll_session is None or self._poll_session.closed:
+            self._poll_session = aiohttp.ClientSession(
                 headers=self._headers,
-                timeout=self._timeout,
+                timeout=self._poll_timeout,
             )
-            logger.debug("LongPoll: создана новая HTTP-сессия")
+            logger.debug(
+                "LongPoll: создана poll-сессия (timeout=%s)", self._poll_timeout
+            )
+
+    async def _ensure_send_session(self) -> None:
+        if self._send_session is None or self._send_session.closed:
+            self._send_session = aiohttp.ClientSession(
+                headers=self._headers,
+                timeout=self._SEND_TIMEOUT,
+            )
+            logger.debug(
+                "LongPoll: создана send-сессия (timeout=%s)", self._SEND_TIMEOUT
+            )
 
     async def _poll_once(self) -> AsyncIterator[Update]:
         """Один запрос к /updates, возвращает обновления через yield."""
@@ -130,12 +244,12 @@ class LongPoll(ILongPoll):
 
         logger.debug("LongPoll: отправляем запрос (marker=%s)", self._marker)
 
-        if self._session is None:
+        if self._poll_session is None:
             raise RuntimeError(
                 "Сессия не инициализирована. Используйте 'async with LongPoll(...)'"
             )
 
-        async with self._session.get(self._url, params=params) as resp:
+        async with self._poll_session.get(self._url, params=params) as resp:
             resp.raise_for_status()
             raw = await resp.text()
 

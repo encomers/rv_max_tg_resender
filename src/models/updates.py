@@ -1,26 +1,47 @@
+"""
+Pydantic-модели входящих данных Max Platform API.
+
+Соответствуют схемам из официальной документации:
+https://dev.max.ru/docs-api
+"""
+
 from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
+# ---------------------------------------------------------------------------
+# Пользователь
+# ---------------------------------------------------------------------------
+
 
 class User(BaseModel):
     user_id: int
-    first_name: Optional[str] = None
-    last_name: Optional[str] = None
-    is_bot: Optional[bool] = None
-    last_activity_time: Optional[int] = None
+    first_name: str
+    last_name: Optional[str] = None  # Nullable optional; у ботов не возвращается
+    username: Optional[str] = None  # Nullable; может отсутствовать у пользователей
+    is_bot: bool = False
+    last_activity_time: Optional[int] = (
+        None  # Unix ms; может отсутствовать по настройкам приватности
+    )
+    name: Optional[str] = None  # Deprecated, будет удалено
 
-    avatar_url: Optional[str] = None
-    full_avatar_url: Optional[str] = None
 
-    name: Optional[str] = None
+# ---------------------------------------------------------------------------
+# Получатель
+# ---------------------------------------------------------------------------
 
 
 class Recipient(BaseModel):
-    chat_id: int
-    chat_type: str
+    chat_id: Optional[int] = None  # Nullable согласно спецификации
+    chat_type: Literal[
+        "chat", "channel", "dialog"
+    ]  # Единственный возможный вариант по документации
+    user_id: Optional[int] = None  # ID пользователя, если ЛС
 
-    user_id: Optional[int] = None
+
+# ---------------------------------------------------------------------------
+# Вложения
+# ---------------------------------------------------------------------------
 
 
 class AttachmentPayload(BaseModel):
@@ -37,55 +58,105 @@ class Attachment(BaseModel):
     size: Optional[int] = None
 
 
-class Markup(BaseModel):
-    from_: int = Field(alias="from")
-    length: int
+# ---------------------------------------------------------------------------
+# Разметка текста
+# ---------------------------------------------------------------------------
 
-    type: str
-    url: str | None = None
+
+class MarkupElement(BaseModel):
+    """Один элемент разметки текста сообщения."""
+
+    from_: int = Field(alias="from")  # позиция начала в тексте
+    length: int
+    type: str  # strong, emphasized, link, monospaced, ...
+    url: Optional[str] = None  # только для type="link"
+
     model_config = {"populate_by_name": True}
 
 
+# ---------------------------------------------------------------------------
+# Тело сообщения
+# ---------------------------------------------------------------------------
+
+
 class MessageBody(BaseModel):
-    mid: str
-    seq: int
+    mid: str  # уникальный ID сообщения
+    seq: int  # порядковый номер в чате
+    text: Optional[str] = None  # Nullable
+    attachments: Optional[List[Attachment]] = None  # Nullable optional
+    markup: Optional[List[MarkupElement]] = None  # Nullable optional
 
-    text: Optional[str] = None
 
-    attachments: Optional[List[Attachment]] = None
+# ---------------------------------------------------------------------------
+# Статистика сообщения (только для постов в каналах)
+# ---------------------------------------------------------------------------
 
-    markup: Optional[List[Markup]] = None
+
+class MessageStat(BaseModel):
+    views: int  # количество просмотров поста
+
+
+# ---------------------------------------------------------------------------
+# Связанное сообщение (reply / forward)
+# ---------------------------------------------------------------------------
+
+
+class LinkedMessage(BaseModel):
+    """
+    Пересланное или ответное сообщение внутри Message.
+
+    type="reply"   — ответ на сообщение
+    type="forward" — пересланное сообщение
+    """
+
+    type: Literal["reply", "forward"]
+    sender: Optional[User] = None  # автор исходного сообщения
+    chat_id: Optional[int] = None  # чат публикации; только для forward
+    message: MessageBody
+
+
+# ---------------------------------------------------------------------------
+# Сообщение
+# ---------------------------------------------------------------------------
 
 
 class Message(BaseModel):
     recipient: Recipient
-    timestamp: int
+    timestamp: int  # Unix-время создания
     body: MessageBody
+    sender: Optional[User] = None  # отсутствует у анонимных сообщений
+    link: Optional[LinkedMessage] = None  # Nullable optional; reply или forward
+    stat: Optional[MessageStat] = None  # Nullable optional; только для постов в каналах
+    url: Optional[str] = None  # Nullable optional; публичная ссылка на пост
 
-    sender: Optional[User] = None
+
+# ---------------------------------------------------------------------------
+# Обновление
+# ---------------------------------------------------------------------------
 
 
 class Update(BaseModel):
-    timestamp: Optional[int] = None
-
-    chat_id: Optional[int] = None
-
-    user: Optional[User] = None
-    user_id: Optional[int] = None
-
-    user_locale: Optional[str] = None
-
-    is_channel: Optional[bool] = None
-
     update_type: Literal[
         "bot_started",
         "bot_added",
         "message_created",
     ]
-
+    timestamp: Optional[int] = None  # Unix-время события
     message: Optional[Message] = None
+
+    # Поля, возвращаемые в зависимости от update_type
+    chat_id: Optional[int] = None
+    user: Optional[User] = None
+    user_id: Optional[int] = None
+    user_locale: Optional[str] = None  # IETF BCP 47; только в диалогах
+    is_channel: Optional[bool] = None
+
+
+# ---------------------------------------------------------------------------
+# Ответ Long Poll
+# ---------------------------------------------------------------------------
 
 
 class LongPollResponse(BaseModel):
     updates: List[Update]
-    marker: int
+    marker: int  # Nullable в доке, но нужен для следующего запроса
